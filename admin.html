@@ -1,0 +1,262 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex">
+<title>관리자 | 그릿마인드랩 강사 모집</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="top"><div class="in">
+  <a class="brand" href="./">GRITMINDLAB<small>강사 모집 관리자</small></a>
+  <div class="flex" id="who"></div>
+</div></header>
+
+<main id="app" style="margin-top:24px"><div class="card empty">불러오는 중…</div></main>
+
+<div class="overlay" id="ov"><div class="modal" id="modal"></div></div>
+<div class="toast" id="toast"></div>
+
+<script type="module">
+import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
+import { getAuth, GoogleAuthProvider, signInWithPopup, onAuthStateChanged, signOut } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
+import { getFirestore, collection, query, where, getDocs, doc, addDoc, updateDoc, deleteDoc, writeBatch, serverTimestamp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+import { firebaseConfig, ADMIN_EMAIL, FIELDS, SESSION_MODES, FEE_TYPES, esc, nl2br, feeText, scheduleText, isOpen, fmtDate } from "./config.js";
+
+const fb = initializeApp(firebaseConfig);
+const auth = getAuth(fb), db = getFirestore(fb);
+const $app = document.getElementById("app"), $ov = document.getElementById("ov"), $m = document.getElementById("modal");
+let lectures = [], apps = [], tab = "lectures", appFilter = "", search = "";
+
+function toast(m){const t=document.getElementById("toast");t.textContent=m;t.style.display="block";clearTimeout(t._h);t._h=setTimeout(()=>t.style.display="none",2600);}
+function openModal(html){ $m.innerHTML = `<button class="x" id="mx">×</button>` + html; $ov.classList.add("on"); document.getElementById("mx").onclick=closeModal; }
+function closeModal(){ $ov.classList.remove("on"); $m.innerHTML=""; }
+$ov.addEventListener("mousedown", e=>{ if(e.target===$ov) closeModal(); });
+const baseUrl = () => location.href.replace(/admin\.html.*$/,"").replace(/[?#].*$/,"");
+const lecUrl = id => baseUrl() + "?id=" + encodeURIComponent(id);
+const tsText = t => { if(!t?.toDate) return ""; const d=t.toDate(); return `${d.getFullYear()}.${String(d.getMonth()+1).padStart(2,"0")}.${String(d.getDate()).padStart(2,"0")} ${String(d.getHours()).padStart(2,"0")}:${String(d.getMinutes()).padStart(2,"0")}`; };
+const telHref = p => "tel:" + String(p||"").replace(/[^0-9+]/g,"");
+async function copy(text){ try{ await navigator.clipboard.writeText(text); toast("링크를 복사했습니다"); }catch(e){ prompt("아래 링크를 복사하세요", text); } }
+
+onAuthStateChanged(auth, async user=>{
+  const who=document.getElementById("who");
+  if(!user){ who.innerHTML=""; renderLogin(); return; }
+  if(user.email!==ADMIN_EMAIL){
+    who.innerHTML="";
+    $app.innerHTML=`<div class="card login-box"><h3>접근 권한이 없습니다</h3><p class="small">${esc(user.email)} 계정은 관리자가 아닙니다.</p><button class="btn line" id="lo">다른 계정으로 로그인</button></div>`;
+    document.getElementById("lo").onclick=()=>signOut(auth); return;
+  }
+  who.innerHTML=`<span class="small" style="color:#cfd5e3">${esc(user.email)}</span><button class="btn line sm" id="lo">로그아웃</button>`;
+  document.getElementById("lo").onclick=()=>signOut(auth);
+  await reload(); render();
+});
+
+function renderLogin(){
+  $app.innerHTML=`<div class="card login-box"><h3 style="margin-top:0">관리자 로그인</h3><p class="small">관리자 구글 계정으로 로그인하세요.</p><button class="btn navy" id="li">Google 계정으로 로그인</button></div>`;
+  document.getElementById("li").onclick=()=>signInWithPopup(auth,new GoogleAuthProvider()).catch(e=>toast("로그인 실패: "+e.code));
+}
+
+async function reload(){
+  const [ls, as] = await Promise.all([ getDocs(collection(db,"lectures")), getDocs(collection(db,"applications")) ]);
+  lectures = ls.docs.map(d=>({id:d.id,...d.data()})).sort((a,b)=>(b.createdAt?.seconds||0)-(a.createdAt?.seconds||0));
+  apps = as.docs.map(d=>({id:d.id,...d.data()})).sort((a,b)=>(b.createdAt?.seconds||0)-(a.createdAt?.seconds||0));
+}
+
+function render(){
+  const cnt = id => apps.filter(a=>a.lectureId===id).length;
+  const tabsHtml = `<div class="tabs">
+    <button class="tab ${tab==="lectures"?"on":""}" data-t="lectures">강의 공고 (${lectures.length})</button>
+    <button class="tab ${tab==="apps"?"on":""}" data-t="apps">지원자 (${apps.length})</button>
+    <button class="tab ${tab==="pool"?"on":""}" data-t="pool">강사 인력풀</button></div>`;
+  let body="";
+  if(tab==="lectures"){
+    body = `<div class="flex between" style="margin-bottom:12px">
+        <div class="flex"><button class="btn primary" id="newLec">+ 새 강의 공고</button><button class="btn line" id="copyMain">공고 목록 링크 복사</button></div>
+        <a class="btn line sm" href="./" target="_blank">사이트 보기 ↗</a></div>
+      ${lectures.length?`<div class="tw"><table class="t"><thead><tr><th>상태</th><th>강의명</th><th>일정</th><th>강사비</th><th>마감</th><th>지원</th><th>관리</th></tr></thead><tbody>
+      ${lectures.map(l=>{ const c=cnt(l.id);
+        const st = l.status==="hidden"?`<span class="badge hidden">숨김</span>`: isOpen(l)?`<span class="badge open">모집중</span>`:`<span class="badge closed">마감</span>`;
+        return `<tr><td>${st}</td><td><b>${esc(l.title)}</b><div class="small">${esc(l.field||"")} ${l.place?"· "+esc(l.place):""}</div></td>
+        <td>${esc(scheduleText(l))}</td><td>${esc(feeText(l))}</td><td>${esc(fmtDate(l.deadline))}</td>
+        <td><a href="#" data-apps="${l.id}"><span class="count ${c?"":"zero"}">${c}</span></a></td>
+        <td><div class="row-actions">
+          <button class="btn line sm" data-copy="${l.id}">링크</button>
+          <button class="btn line sm" data-edit="${l.id}">수정</button>
+          <button class="btn line sm" data-dup="${l.id}">복제</button>
+          <button class="btn line sm" data-st="${l.id}">${l.status==="open"?"마감":"재오픈"}</button>
+          <button class="btn danger sm" data-del="${l.id}">삭제</button></div></td></tr>`;}).join("")}
+      </tbody></table></div>`:`<div class="card empty">등록된 공고가 없습니다. "새 강의 공고"를 눌러 시작하세요.</div>`}`;
+  } else if(tab==="apps"){
+    const list = filteredApps();
+    body = `<div class="flex" style="margin-bottom:12px">
+        <select id="af" style="max-width:360px"><option value="">전체 강의</option>${lectures.map(l=>`<option value="${l.id}" ${appFilter===l.id?"selected":""}>${esc(l.title)} (${cnt(l.id)})</option>`).join("")}</select>
+        <input type="text" id="sq" placeholder="이름·연락처·분야 검색" value="${esc(search)}" style="max-width:240px">
+        <button class="btn line" id="csv">엑셀(CSV) 다운로드</button></div>
+      ${list.length?`<div class="tw"><table class="t"><thead><tr><th>지원일</th><th>강의</th><th>이름</th><th>연락처</th><th>분야</th><th>파일</th><th>메모</th><th></th></tr></thead><tbody>
+      ${list.map(a=>`<tr><td class="small">${esc(tsText(a.createdAt))}</td><td>${esc(lecTitle(a))}</td>
+        <td><b>${esc(a.name)}</b></td>
+        <td><a href="${telHref(a.phone)}">${esc(a.phone)}</a><div class="small"><a href="mailto:${esc(a.email)}">${esc(a.email)}</a></div></td>
+        <td class="small">${esc((a.fields||[]).join(", "))}</td><td>${(a.files||[]).length?"📎 "+a.files.length:"-"}</td>
+        <td class="small">${esc((a.memo||"").slice(0,30))}</td>
+        <td><button class="btn line sm" data-view="${a.id}">상세</button></td></tr>`).join("")}
+      </tbody></table></div>`:`<div class="card empty">지원자가 없습니다.</div>`}`;
+  } else {
+    const pool = poolList();
+    body = `<div class="flex" style="margin-bottom:12px"><input type="text" id="sq" placeholder="이름·연락처·분야·지역 검색" value="${esc(search)}" style="max-width:300px">
+      <span class="small">같은 휴대폰 번호의 지원을 한 명으로 묶어 최신 프로필을 보여줍니다.</span></div>
+      ${pool.length?`<div class="tw"><table class="t"><thead><tr><th>이름</th><th>연락처</th><th>분야</th><th>지역</th><th>지원 강의</th><th>최근 지원</th><th></th></tr></thead><tbody>
+      ${pool.map(p=>`<tr><td><b>${esc(p.latest.name)}</b></td><td><a href="${telHref(p.latest.phone)}">${esc(p.latest.phone)}</a><div class="small">${esc(p.latest.email)}</div></td>
+        <td class="small">${esc((p.latest.fields||[]).join(", "))}</td><td class="small">${esc(p.latest.region||"")}</td>
+        <td class="small">${p.items.map(a=>esc(lecTitle(a))).join("<br>")}</td><td class="small">${esc(tsText(p.latest.createdAt))}</td>
+        <td><button class="btn line sm" data-view="${p.latest.id}">프로필</button></td></tr>`).join("")}
+      </tbody></table></div>`:`<div class="card empty">아직 강사 정보가 없습니다.</div>`}`;
+  }
+  $app.innerHTML = tabsHtml + body;
+  bind();
+}
+
+const lecTitle = a => (lectures.find(l=>l.id===a.lectureId)?.title) || a.lectureTitle || "(삭제된 공고)";
+const matches = a => { if(!search) return true; const s=search.toLowerCase();
+  return [a.name,a.phone,a.email,a.region,(a.fields||[]).join(" "),a.career,lecTitle(a)].join(" ").toLowerCase().includes(s); };
+function filteredApps(){ return apps.filter(a=>(!appFilter||a.lectureId===appFilter) && matches(a)); }
+function poolList(){
+  const m = new Map();
+  for(const a of apps){ const k=String(a.phone||"").replace(/[^0-9]/g,"")||a.email; if(!m.has(k)) m.set(k,{latest:a,items:[]}); m.get(k).items.push(a); }
+  return [...m.values()].filter(p=>p.items.some(matches));
+}
+
+function bind(){
+  $app.querySelectorAll(".tab").forEach(b=>b.onclick=()=>{tab=b.dataset.t;search="";render();});
+  const q = s => $app.querySelector(s);
+  q("#newLec") && (q("#newLec").onclick=()=>lectureForm());
+  q("#copyMain") && (q("#copyMain").onclick=()=>copy(baseUrl()));
+  $app.querySelectorAll("[data-copy]").forEach(b=>b.onclick=()=>copy(lecUrl(b.dataset.copy)));
+  $app.querySelectorAll("[data-edit]").forEach(b=>b.onclick=()=>lectureForm(lectures.find(l=>l.id===b.dataset.edit)));
+  $app.querySelectorAll("[data-dup]").forEach(b=>b.onclick=()=>{ const {id,createdAt,...rest}=lectures.find(l=>l.id===b.dataset.dup); lectureForm({...rest,title:rest.title+" (복사본)"},true); });
+  $app.querySelectorAll("[data-st]").forEach(b=>b.onclick=async()=>{ const l=lectures.find(x=>x.id===b.dataset.st);
+    await updateDoc(doc(db,"lectures",l.id),{status:l.status==="open"?"closed":"open",updatedAt:serverTimestamp()}); await reload(); render(); toast("상태를 변경했습니다"); });
+  $app.querySelectorAll("[data-del]").forEach(b=>b.onclick=async()=>{ const l=lectures.find(x=>x.id===b.dataset.del);
+    if(!confirm(`"${l.title}" 공고를 삭제할까요?\n지원자 정보는 남아 있습니다.`)) return;
+    await deleteDoc(doc(db,"lectures",l.id)); await reload(); render(); toast("삭제했습니다"); });
+  $app.querySelectorAll("[data-apps]").forEach(a=>a.onclick=e=>{e.preventDefault();tab="apps";appFilter=a.dataset.apps;render();});
+  $app.querySelectorAll("[data-view]").forEach(b=>b.onclick=()=>viewApp(apps.find(a=>a.id===b.dataset.view)));
+  q("#af") && (q("#af").onchange=e=>{appFilter=e.target.value;render();});
+  q("#sq") && (q("#sq").oninput=e=>{ search=e.target.value; const pos=e.target.selectionStart; render(); const n=$app.querySelector("#sq"); n.focus(); n.setSelectionRange(pos,pos); });
+  q("#csv") && (q("#csv").onclick=downloadCsv);
+}
+
+function lectureForm(l={}, isNew=!l.id){
+  const v = k => esc(l[k]??"");
+  openModal(`<h3>${isNew?"새 강의 공고":"공고 수정"}</h3>
+  <form id="lf">
+    <div class="row"><label class="l">강의명 <span class="req">*</span></label><input type="text" name="title" value="${v("title")}" maxlength="120" required></div>
+    <div class="two">
+      <div class="row"><label class="l">분야</label><select name="field"><option value="">선택</option>${FIELDS.map(f=>`<option ${l.field===f?"selected":""}>${esc(f)}</option>`).join("")}</select></div>
+      <div class="row"><label class="l">강의 주제</label><input type="text" name="topic" value="${v("topic")}" placeholder="예) 공기업 NCS 직업기초능력"></div>
+    </div>
+    <div class="two">
+      <div class="row"><label class="l">강의 시작일</label><input type="date" name="dateStart" value="${v("dateStart")}"></div>
+      <div class="row"><label class="l">종료일 (여러 날일 때)</label><input type="date" name="dateEnd" value="${v("dateEnd")}"></div>
+    </div>
+    <div class="two">
+      <div class="row"><label class="l">시간</label><input type="text" name="timeText" value="${v("timeText")}" placeholder="예) 10:00~13:00"></div>
+      <div class="row"><label class="l">총 시간</label><input type="text" name="hours" value="${v("hours")}" placeholder="예) 3시간 / 4회 12시간"></div>
+    </div>
+    <div class="two">
+      <div class="row"><label class="l">진행 방식</label><select name="mode">${Object.entries(SESSION_MODES).map(([k,t])=>`<option value="${k}" ${l.mode===k?"selected":""}>${t}</option>`).join("")}</select></div>
+      <div class="row"><label class="l">장소</label><input type="text" name="place" value="${v("place")}" placeholder="예) 강원대학교 춘천캠퍼스"></div>
+    </div>
+    <div class="two">
+      <div class="row"><label class="l">교육 대상</label><input type="text" name="target" value="${v("target")}" placeholder="예) 대학 3~4학년 30명"></div>
+      <div class="row"><label class="l">모집 강사 수</label><input type="number" name="headcount" value="${v("headcount")}" min="0"></div>
+    </div>
+    <div class="two">
+      <div class="row"><label class="l">강사비 기준</label><select name="feeType">${Object.entries(FEE_TYPES).map(([k,t])=>`<option value="${k}" ${l.feeType===k?"selected":""}>${t}</option>`).join("")}</select></div>
+      <div class="row"><label class="l">금액 (원)</label><input type="number" name="feeAmount" value="${v("feeAmount")}" min="0" step="1000"></div>
+    </div>
+    <div class="row"><label class="l">강사비 비고</label><input type="text" name="feeNote" value="${v("feeNote")}" placeholder="예) 세전, 교통비 별도"></div>
+    <div class="two">
+      <div class="row"><label class="l">지원 마감일</label><input type="date" name="deadline" value="${v("deadline")}"><div class="hint">마감일이 지나면 자동으로 모집마감 처리</div></div>
+      <div class="row"><label class="l">공개 상태</label><select name="status">
+        <option value="open" ${(l.status||"open")==="open"?"selected":""}>모집중 (공개)</option>
+        <option value="closed" ${l.status==="closed"?"selected":""}>마감 (공개)</option>
+        <option value="hidden" ${l.status==="hidden"?"selected":""}>숨김 (비공개)</option></select></div>
+    </div>
+    <div class="row"><label class="l">강의 내용</label><textarea name="description">${v("description")}</textarea></div>
+    <div class="row"><label class="l">자격·우대사항</label><textarea name="requirements" style="min-height:70px">${v("requirements")}</textarea></div>
+    <div class="row"><label class="l">지원 시 유의사항</label><textarea name="notice" style="min-height:70px" placeholder="예) 강사비는 기관에서 직접 지급되며, 강의섭외대행비 안내는 섭외 시 별도 연락드립니다.">${v("notice")}</textarea></div>
+    <div class="flex" style="justify-content:flex-end"><button type="button" class="btn line" id="lc">취소</button><button class="btn primary" id="ls">${isNew?"등록":"저장"}</button></div>
+  </form>`);
+  document.getElementById("lc").onclick=closeModal;
+  document.getElementById("lf").onsubmit=async e=>{
+    e.preventDefault();
+    const f=e.target, g=k=>f.elements[k].value.trim();
+    const data={}; ["title","field","topic","dateStart","dateEnd","timeText","hours","mode","place","target","feeType","feeNote","deadline","status","description","requirements","notice"].forEach(k=>data[k]=g(k));
+    data.headcount = g("headcount") ? Number(g("headcount")) : null;
+    data.feeAmount = g("feeAmount") ? Number(g("feeAmount")) : 0;
+    if(!data.title) return toast("강의명을 입력하세요");
+    const btn=document.getElementById("ls"); btn.disabled=true;
+    try{
+      if(isNew){ data.createdAt=serverTimestamp(); const r=await addDoc(collection(db,"lectures"),data); await reload(); closeModal(); render(); copy(lecUrl(r.id)); toast("등록 완료 — 지원 링크를 복사했습니다"); }
+      else { data.updatedAt=serverTimestamp(); await updateDoc(doc(db,"lectures",l.id),data); await reload(); closeModal(); render(); toast("저장했습니다"); }
+    }catch(err){ console.error(err); toast("저장 실패: "+err.code); btn.disabled=false; }
+  };
+}
+
+function viewApp(a){
+  const others = apps.filter(x=>x.id!==a.id && String(x.phone).replace(/[^0-9]/g,"")===String(a.phone).replace(/[^0-9]/g,""));
+  openModal(`<div class="flex" style="align-items:flex-start;gap:18px;margin-bottom:14px">
+      ${a.photo?`<div class="photo-box"><div class="ph" style="background-image:url(${esc(a.photo)})"></div></div>`:""}
+      <div><h3 style="margin:0 0 4px">${esc(a.name)}</h3>
+        <div class="small">${esc(lecTitle(a))} · ${esc(tsText(a.createdAt))} 지원</div>
+        <div class="flex" style="margin-top:10px"><a class="btn navy sm" href="${telHref(a.phone)}">📞 전화</a><a class="btn line sm" href="sms:${String(a.phone||"").replace(/[^0-9+]/g,"")}">💬 문자</a><a class="btn line sm" href="mailto:${esc(a.email)}">✉ 메일</a></div></div></div>
+    <dl class="kv">
+      <dt>휴대폰</dt><dd>${esc(a.phone)}</dd><dt>이메일</dt><dd>${esc(a.email)}</dd>
+      <dt>지역</dt><dd>${esc(a.region||"-")}</dd><dt>강의 분야</dt><dd>${esc((a.fields||[]).join(", ")||"-")}</dd>
+      <dt>학력</dt><dd>${esc(a.education||"-")}</dd><dt>자격증</dt><dd>${esc(a.certs||"-")}</dd>
+      <dt>경력 요약</dt><dd>${nl2br(a.career||"-")}</dd><dt>강의 이력</dt><dd>${nl2br(a.history||"-")}</dd>
+      <dt>지원 메모</dt><dd>${nl2br(a.message||"-")}</dd>
+      <dt>첨부 파일</dt><dd>${(a.files||[]).length? a.files.map((f,i)=>`<button class="btn line sm" data-dl="${i}" style="margin:0 6px 6px 0">⬇ ${esc(f.name)} (${(f.size/1024/1024).toFixed(1)}MB)</button>`).join("") : "-"}</dd>
+      ${others.length?`<dt>다른 지원</dt><dd>${others.map(o=>esc(lecTitle(o))+" <span class='small'>("+esc(tsText(o.createdAt))+")</span>").join("<br>")}</dd>`:""}
+    </dl>
+    <div class="row" style="margin-top:16px"><label class="l">관리자 메모 (강사에게 보이지 않음)</label><textarea id="memo" placeholder="예) 11/25 통화, 12월 일정 가능">${esc(a.memo||"")}</textarea></div>
+    <div class="flex between"><button class="btn danger sm" id="adel">지원서 삭제</button><button class="btn primary" id="msave">메모 저장</button></div>`);
+  $m.querySelectorAll("[data-dl]").forEach(b=>b.onclick=()=>downloadFile(a,+b.dataset.dl,b));
+  document.getElementById("msave").onclick=async()=>{ await updateDoc(doc(db,"applications",a.id),{memo:document.getElementById("memo").value}); a.memo=document.getElementById("memo").value; render(); toast("메모를 저장했습니다"); };
+  document.getElementById("adel").onclick=async()=>{
+    if(!confirm(`${a.name}님의 지원서와 첨부파일을 영구 삭제할까요? 되돌릴 수 없습니다.`)) return;
+    const cs = await getDocs(query(collection(db,"fileChunks"),where("appId","==",a.id)));
+    let b=writeBatch(db), n=0;
+    for(const d of cs.docs){ b.delete(d.ref); if(++n>=400){ await b.commit(); b=writeBatch(db); n=0; } }
+    b.delete(doc(db,"applications",a.id)); await b.commit();
+    closeModal(); await reload(); render(); toast("삭제했습니다");
+  };
+}
+
+async function downloadFile(a,i,btn){
+  const f=a.files[i]; const old=btn.innerHTML; btn.disabled=true; btn.textContent="받는 중…";
+  try{
+    const cs = await getDocs(query(collection(db,"fileChunks"),where("appId","==",a.id),where("fileIdx","==",i)));
+    const parts = cs.docs.map(d=>d.data()).sort((x,y)=>x.idx-y.idx);
+    if(parts.length!==f.chunks) throw new Error("파일 조각이 부족합니다");
+    const bin = atob(parts.map(p=>p.data).join(""));
+    const arr = new Uint8Array(bin.length); for(let k=0;k<bin.length;k++) arr[k]=bin.charCodeAt(k);
+    const url = URL.createObjectURL(new Blob([arr],{type:f.type}));
+    const el=document.createElement("a"); el.href=url; el.download=f.name; document.body.appendChild(el); el.click(); el.remove();
+    setTimeout(()=>URL.revokeObjectURL(url),5000);
+  }catch(e){ console.error(e); toast("다운로드 실패: "+(e.message||e.code)); }
+  btn.disabled=false; btn.innerHTML=old;
+}
+
+function downloadCsv(){
+  const list=filteredApps();
+  const head=["지원일","강의","이름","휴대폰","이메일","지역","분야","학력","자격증","경력요약","강의이력","지원메모","첨부파일","관리자메모"];
+  const cell=s=>`"${String(s??"").replace(/"/g,'""')}"`;
+  const rows=list.map(a=>[tsText(a.createdAt),lecTitle(a),a.name,a.phone,a.email,a.region,(a.fields||[]).join(", "),a.education,a.certs,a.career,a.history,a.message,(a.files||[]).map(f=>f.name).join(", "),a.memo].map(cell).join(","));
+  const blob=new Blob(["﻿"+[head.map(cell).join(","),...rows].join("\r\n")],{type:"text/csv;charset=utf-8"});
+  const el=document.createElement("a"); el.href=URL.createObjectURL(blob); el.download=`강사지원자_${new Date().toISOString().slice(0,10)}.csv`; el.click();
+}
+</script>
+</body>
+</html>
