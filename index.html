@@ -1,0 +1,286 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>그릿마인드랩 강사 모집</title>
+<meta name="description" content="그릿마인드랩 강의 출강 강사 모집 — 강의 공고를 확인하고 프로필로 지원하세요.">
+<meta property="og:title" content="그릿마인드랩 강사 모집">
+<meta property="og:description" content="강의 공고를 확인하고 프로필로 지원하세요.">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="top"><div class="in">
+  <a class="brand" href="./">GRITMINDLAB<small>그릿마인드랩 강사 모집</small></a>
+</div></header>
+
+<section class="hero"><div class="in">
+  <h1 id="heroTitle">출강 강사 모집 공고</h1>
+  <p id="heroSub">공고를 확인하고 프로필과 함께 지원해 주세요. 섭외 시 담당자가 개별 연락드립니다.</p>
+</div></section>
+
+<main id="app"><div class="card empty">불러오는 중…</div></main>
+
+<footer>그릿마인드랩 GRITMINDLAB · 강사 모집 문의는 담당자에게 연락해 주세요.</footer>
+<div class="toast" id="toast"></div>
+
+<script type="module">
+import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
+import { getFirestore, collection, query, where, getDocs, getDoc, doc, writeBatch, serverTimestamp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+import { firebaseConfig, FIELDS, SESSION_MODES, esc, nl2br, feeText, scheduleText, dday, isOpen, fmtDate } from "./config.js";
+
+const app = initializeApp(firebaseConfig);
+const db = getFirestore(app);
+const $app = document.getElementById("app");
+const PROFILE_KEY = "gml_instructor_profile_v1";
+const MAX_FILE = 5 * 1024 * 1024, MAX_TOTAL = 10 * 1024 * 1024, CHUNK = 700000;
+
+function toast(m){const t=document.getElementById("toast");t.textContent=m;t.style.display="block";clearTimeout(t._h);t._h=setTimeout(()=>t.style.display="none",2600);}
+function lsGet(){try{return JSON.parse(localStorage.getItem(PROFILE_KEY)||"null");}catch(e){return null;}}
+function lsSet(v){try{localStorage.setItem(PROFILE_KEY,JSON.stringify(v));}catch(e){}}
+function lsDel(){try{localStorage.removeItem(PROFILE_KEY);}catch(e){}}
+
+function statusBadges(l){
+  const open = isOpen(l), dd = dday(l.deadline);
+  let b = open ? `<span class="badge open">모집중</span>` : `<span class="badge closed">모집마감</span>`;
+  if (open && dd !== null) b += `<span class="badge dday">${dd===0?"오늘 마감":"D-"+dd}</span>`;
+  if (l.field) b += `<span class="badge">${esc(l.field)}</span>`;
+  if (l.mode) b += `<span class="badge">${esc(SESSION_MODES[l.mode]||l.mode)}</span>`;
+  return b;
+}
+
+async function loadList(){
+  const qs = await getDocs(query(collection(db,"lectures"), where("status","in",["open","closed"])));
+  const list = qs.docs.map(d=>({id:d.id,...d.data()}));
+  list.sort((a,b)=>{
+    const oa=isOpen(a)?0:1, ob=isOpen(b)?0:1;
+    if(oa!==ob) return oa-ob;
+    return oa===0 ? String(a.deadline||"9999").localeCompare(String(b.deadline||"9999")) : String(b.dateStart||"").localeCompare(String(a.dateStart||""));
+  });
+  return list;
+}
+
+let filter = "open";
+async function renderList(){
+  document.getElementById("heroTitle").textContent = "출강 강사 모집 공고";
+  let list;
+  try { list = await loadList(); }
+  catch(e){ console.error(e); $app.innerHTML = `<div class="card empty">공고를 불러오지 못했습니다. 잠시 후 다시 시도해 주세요.</div>`; return; }
+  const draw = () => {
+    const shown = list.filter(l => filter==="all" ? true : isOpen(l));
+    $app.innerHTML = `
+      <div class="toolbar">
+        <button class="chip ${filter==="open"?"on":""}" data-f="open">모집중 (${list.filter(isOpen).length})</button>
+        <button class="chip ${filter==="all"?"on":""}" data-f="all">전체 (${list.length})</button>
+      </div>
+      ${shown.length ? `<div class="grid">${shown.map(l=>`
+        <div class="card lec" data-id="${l.id}">
+          <div class="badges">${statusBadges(l)}</div>
+          <h3>${esc(l.title)}</h3>
+          <dl class="meta">
+            <dt>일정</dt><dd>${esc(scheduleText(l))}</dd>
+            <dt>장소</dt><dd>${esc(l.place||SESSION_MODES[l.mode]||"-")}</dd>
+            ${l.target?`<dt>대상</dt><dd>${esc(l.target)}</dd>`:""}
+            <dt>강사비</dt><dd class="fee">${esc(feeText(l))}</dd>
+            ${l.deadline?`<dt>마감</dt><dd>${esc(fmtDate(l.deadline))}</dd>`:""}
+          </dl>
+        </div>`).join("")}</div>` : `<div class="card empty">현재 모집 중인 공고가 없습니다.</div>`}`;
+    $app.querySelectorAll(".chip").forEach(c=>c.onclick=()=>{filter=c.dataset.f;draw();});
+    $app.querySelectorAll(".lec").forEach(c=>c.onclick=()=>{location.href="?id="+encodeURIComponent(c.dataset.id);});
+  };
+  draw();
+}
+
+async function renderDetail(id){
+  let l;
+  try{
+    const s = await getDoc(doc(db,"lectures",id));
+    if(!s.exists()) throw new Error("none");
+    l = {id:s.id,...s.data()};
+  }catch(e){
+    $app.innerHTML = `<div class="card empty">공고를 찾을 수 없습니다.<br><br><a class="btn line" href="./">공고 목록 보기</a></div>`; return;
+  }
+  document.title = l.title + " | 그릿마인드랩 강사 모집";
+  document.getElementById("heroTitle").textContent = l.title;
+  document.getElementById("heroSub").textContent = "강사 지원서 작성";
+  const open = isOpen(l);
+  const saved = lsGet() || {};
+
+  $app.innerHTML = `
+  <div class="detail">
+    <div class="card">
+      <div class="badges">${statusBadges(l)}</div>
+      <h2>${esc(l.title)}</h2>
+      <dl class="meta">
+        <dt>주제</dt><dd>${esc(l.topic||l.field||"-")}</dd>
+        <dt>일정</dt><dd>${esc(scheduleText(l))}</dd>
+        ${l.hours?`<dt>총 시간</dt><dd>${esc(l.hours)}</dd>`:""}
+        <dt>방식</dt><dd>${esc(SESSION_MODES[l.mode]||"-")}</dd>
+        <dt>장소</dt><dd>${esc(l.place||"-")}</dd>
+        ${l.target?`<dt>대상</dt><dd>${esc(l.target)}</dd>`:""}
+        ${l.headcount?`<dt>모집인원</dt><dd>${esc(l.headcount)}명</dd>`:""}
+        <dt>강사비</dt><dd class="fee">${esc(feeText(l))}</dd>
+        ${l.deadline?`<dt>지원마감</dt><dd>${esc(fmtDate(l.deadline))}</dd>`:""}
+      </dl>
+      ${l.description?`<div class="sec-title">강의 내용</div><div class="desc">${nl2br(l.description)}</div>`:""}
+      ${l.requirements?`<div class="sec-title">자격·우대사항</div><div class="desc">${nl2br(l.requirements)}</div>`:""}
+      ${l.notice?`<div class="sec-title">지원 시 유의사항</div><div class="notice">${nl2br(l.notice)}</div>`:""}
+      <div style="margin-top:18px"><a class="btn line sm" href="./">← 공고 목록</a></div>
+    </div>
+
+    <div class="card" id="formCard">
+    ${!open ? `<div class="empty">모집이 마감된 공고입니다.</div>` : `
+      <h3 style="margin:0 0 4px">강사 지원서</h3>
+      <p class="small" style="margin:0 0 18px">별도 합격·불합격 안내 없이, 섭외 시 담당자가 개별 연락드립니다.</p>
+      <form id="f" novalidate>
+        <div class="row">
+          <label class="l">프로필 사진</label>
+          <div class="photo-box">
+            <div class="ph" id="ph">사진</div>
+            <div><input type="file" id="photo" accept="image/*" hidden>
+              <button type="button" class="btn line sm" id="photoBtn">사진 선택</button>
+              <button type="button" class="btn line sm" id="photoDel" style="display:none">삭제</button>
+              <div class="hint">선택 사항 · 자동으로 작게 줄여 저장됩니다</div></div>
+          </div>
+        </div>
+        <div class="two">
+          <div class="row"><label class="l">성명 <span class="req">*</span></label><input type="text" name="name" maxlength="40" required></div>
+          <div class="row"><label class="l">휴대폰 <span class="req">*</span></label><input type="tel" name="phone" maxlength="20" placeholder="010-0000-0000" required></div>
+        </div>
+        <div class="two">
+          <div class="row"><label class="l">이메일 <span class="req">*</span></label><input type="email" name="email" maxlength="100" required></div>
+          <div class="row"><label class="l">거주지 / 출강 가능 지역</label><input type="text" name="region" maxlength="100" placeholder="예) 서울 관악구 / 수도권 전 지역"></div>
+        </div>
+        <div class="row"><label class="l">주요 강의 분야</label>
+          <div class="checks">${FIELDS.map(f=>`<label><input type="checkbox" name="fields" value="${esc(f)}">${esc(f)}</label>`).join("")}</div></div>
+        <div class="row"><label class="l">경력 요약 <span class="req">*</span></label>
+          <textarea name="career" maxlength="3000" placeholder="예) 취업·진로 강의 8년 / 대학·고용센터·공공기관 출강 / 현) ○○ 대표" required></textarea></div>
+        <div class="row"><label class="l">대표 강의 이력</label>
+          <textarea name="history" maxlength="5000" placeholder="기관명 · 강의명 · 연도 순으로 적어 주세요"></textarea></div>
+        <div class="two">
+          <div class="row"><label class="l">최종 학력</label><input type="text" name="education" maxlength="200"></div>
+          <div class="row"><label class="l">보유 자격증</label><input type="text" name="certs" maxlength="500" placeholder="예) 직업상담사 2급, KAC"></div>
+        </div>
+        <div class="row"><label class="l">프로필·강의자료 파일</label>
+          <div class="drop" id="drop">클릭하거나 파일을 끌어다 놓으세요<br><span class="small">PDF·HWP·DOCX·PPTX·이미지 · 파일당 5MB, 합계 10MB 이하</span></div>
+          <input type="file" id="fileIn" multiple accept=".pdf,.hwp,.hwpx,.doc,.docx,.ppt,.pptx,.jpg,.jpeg,.png" hidden>
+          <ul class="files" id="fileList"></ul></div>
+        <div class="row"><label class="l">이 강의 관련 메모</label>
+          <textarea name="message" maxlength="2000" placeholder="가능 일정, 관련 강의 경험, 하고 싶은 말 등"></textarea></div>
+        <div class="row">
+          <div class="agree"><b>개인정보 수집·이용 동의</b><br>
+          · 수집 항목: 성명, 휴대폰, 이메일, 지역, 사진, 경력·학력·자격, 제출 파일<br>
+          · 이용 목적: 강사 섭외 검토 및 개별 연락, 강사 인력풀 관리<br>
+          · 보유 기간: 지원일로부터 3년 또는 삭제 요청 시까지 (요청 시 즉시 삭제)<br>
+          · 동의를 거부할 수 있으나, 거부 시 지원이 제한됩니다.</div>
+          <label class="agree-check"><input type="checkbox" name="agree"> 위 내용에 동의합니다 <span class="req" style="color:var(--accent)">*</span></label>
+        </div>
+        <div class="row"><label class="agree-check" style="font-weight:500"><input type="checkbox" name="remember" ${saved.name?"checked":""}> 이 기기에 내 프로필 저장 (다음 지원 시 자동 입력, 파일 제외)</label></div>
+        <button class="btn primary" style="width:100%;padding:14px" id="submitBtn">지원하기</button>
+      </form>`}
+    </div>
+  </div>`;
+  if (open) setupForm(l, saved);
+}
+
+function setupForm(l, saved){
+  const f = document.getElementById("f");
+  let photoData = saved.photo || "";
+  const files = [];
+  // 저장된 프로필 채우기
+  ["name","phone","email","region","career","history","education","certs"].forEach(k=>{ if(saved[k]) f.elements[k].value = saved[k]; });
+  (saved.fields||[]).forEach(v=>{ const c=[...f.querySelectorAll('input[name=fields]')].find(x=>x.value===v); if(c) c.checked=true; });
+  const ph=document.getElementById("ph"), pd=document.getElementById("photoDel");
+  const showPhoto=()=>{ ph.style.backgroundImage = photoData?`url(${photoData})`:""; ph.textContent = photoData?"":"사진"; pd.style.display = photoData?"":"none"; };
+  showPhoto();
+  document.getElementById("photoBtn").onclick=()=>document.getElementById("photo").click();
+  pd.onclick=()=>{photoData="";showPhoto();};
+  document.getElementById("photo").onchange=async e=>{
+    const file=e.target.files[0]; if(!file) return;
+    try{ photoData = await resizeImage(file, 480, 0.85); showPhoto(); }catch(err){ toast("사진을 읽을 수 없습니다"); }
+    e.target.value="";
+  };
+  // 파일
+  const fileIn=document.getElementById("fileIn"), drop=document.getElementById("drop"), fl=document.getElementById("fileList");
+  const drawFiles=()=>{ fl.innerHTML = files.map((x,i)=>`<li><span>📎 ${esc(x.name)} <span class="small">(${(x.size/1024/1024).toFixed(2)}MB)</span></span><button type="button" data-i="${i}">삭제</button></li>`).join("");
+    fl.querySelectorAll("button").forEach(b=>b.onclick=()=>{files.splice(+b.dataset.i,1);drawFiles();}); };
+  const addFiles=list=>{
+    for(const x of list){
+      if(x.size>MAX_FILE){ toast(`${x.name}: 5MB를 넘습니다`); continue; }
+      if(files.reduce((s,y)=>s+y.size,0)+x.size>MAX_TOTAL){ toast("파일 합계가 10MB를 넘습니다"); break; }
+      if(files.length>=5){ toast("파일은 5개까지 올릴 수 있습니다"); break; }
+      files.push(x);
+    }
+    drawFiles();
+  };
+  drop.onclick=()=>fileIn.click();
+  fileIn.onchange=e=>{addFiles(e.target.files);fileIn.value="";};
+  drop.ondragover=e=>{e.preventDefault();drop.style.borderColor="var(--accent)";};
+  drop.ondragleave=()=>drop.style.borderColor="";
+  drop.ondrop=e=>{e.preventDefault();drop.style.borderColor="";addFiles(e.dataTransfer.files);};
+
+  f.onsubmit=async e=>{
+    e.preventDefault();
+    const v = k => f.elements[k].value.trim();
+    const data = { name:v("name"), phone:v("phone"), email:v("email"), region:v("region"), career:v("career"), history:v("history"),
+      education:v("education"), certs:v("certs"), message:v("message"),
+      fields:[...f.querySelectorAll('input[name=fields]:checked')].map(x=>x.value) };
+    if(!data.name) return toast("성명을 입력해 주세요");
+    if(!/^[0-9\-\s+]{9,20}$/.test(data.phone)) return toast("휴대폰 번호를 확인해 주세요");
+    if(!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(data.email)) return toast("이메일을 확인해 주세요");
+    if(!data.career) return toast("경력 요약을 입력해 주세요");
+    if(!f.elements.agree.checked) return toast("개인정보 수집·이용에 동의해 주세요");
+
+    const btn=document.getElementById("submitBtn"); btn.disabled=true; btn.innerHTML=`<span class="spinner"></span> 제출 중…`;
+    try{
+      const appRef = doc(collection(db,"applications"));
+      const meta = [];
+      // 파일을 조각으로 나눠 저장
+      for(let i=0;i<files.length;i++){
+        const b64 = await toBase64(files[i]);
+        const n = Math.ceil(b64.length/CHUNK);
+        meta.push({ name:files[i].name.slice(0,200), type:files[i].type||"application/octet-stream", size:files[i].size, chunks:n });
+        let batch = writeBatch(db), cnt=0, bytes=0;
+        for(let j=0;j<n;j++){
+          const part=b64.slice(j*CHUNK,(j+1)*CHUNK);
+          batch.set(doc(collection(db,"fileChunks")), { appId:appRef.id, fileIdx:i, idx:j, data:part, createdAt:serverTimestamp() });
+          cnt++; bytes+=part.length;
+          if(bytes>=CHUNK*6){ await batch.commit(); batch=writeBatch(db); cnt=0; bytes=0; }
+        }
+        if(cnt) await batch.commit();
+      }
+      const b2 = writeBatch(db);
+      b2.set(appRef, { ...data, photo:photoData, files:meta, lectureId:l.id, lectureTitle:l.title||"", memo:"", createdAt:serverTimestamp() });
+      await b2.commit();
+      if(f.elements.remember.checked){ const {message, ...keep}=data; lsSet({...keep, photo:photoData}); } else lsDel();
+      document.getElementById("formCard").innerHTML = `<div class="done"><div class="ic">✓</div>
+        <h3 style="margin:0 0 8px">지원이 완료되었습니다</h3>
+        <p class="small">검토 후 섭외 시 담당자가 개별 연락드립니다.<br>지원해 주셔서 감사합니다.</p>
+        <a class="btn line" href="./" style="margin-top:14px">다른 공고 보기</a></div>`;
+      window.scrollTo({top:0,behavior:"smooth"});
+    }catch(err){
+      console.error(err);
+      toast("제출에 실패했습니다. 잠시 후 다시 시도해 주세요.");
+      btn.disabled=false; btn.textContent="지원하기";
+    }
+  };
+}
+
+function toBase64(file){
+  return new Promise((res,rej)=>{ const r=new FileReader(); r.onload=()=>res(String(r.result).split(",")[1]||""); r.onerror=rej; r.readAsDataURL(file); });
+}
+function resizeImage(file,max,q){
+  return new Promise((res,rej)=>{
+    const img=new Image(), url=URL.createObjectURL(file);
+    img.onload=()=>{ const s=Math.min(1,max/Math.max(img.width,img.height)); const c=document.createElement("canvas");
+      c.width=Math.round(img.width*s); c.height=Math.round(img.height*s); c.getContext("2d").drawImage(img,0,0,c.width,c.height);
+      URL.revokeObjectURL(url); res(c.toDataURL("image/jpeg",q)); };
+    img.onerror=rej; img.src=url;
+  });
+}
+
+const id = new URLSearchParams(location.search).get("id");
+id ? renderDetail(id) : renderList();
+</script>
+</body>
+</html>
